@@ -1,0 +1,6 @@
+tensorflow
+numpy
+pyyaml
+h5py
+easydict
+tqdm
