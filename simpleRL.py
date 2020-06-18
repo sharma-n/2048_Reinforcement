@@ -1,6 +1,8 @@
 import tensorflow as tf
 from tensorflow.keras import Model
 from tensorflow.keras.layers import Dense, Flatten, Conv2D, Concatenate, Reshape
+from multiprocessing.pool import ThreadPool
+from threading import Lock
 import numpy as np
 import math
 from os import path
@@ -89,95 +91,112 @@ class Simple_RLAgent(Model):
             power_grid[i, j, log_grid[i,j]] = 1.0
         return power_grid
 
+def play_single_game(f_in):
+    model, epsilon, controls = f_in
+    grid = new_game(cfg.GAME_CONFIG.GRID_LEN)
+    finish = False
+    ep_score, n_iter = 0, 0
+    replay_labels, replay_memory = [], []
+
+    while not finish:
+        # run model and select move with highest Q value
+        prev_grid = grid.copy()
+        state = model.power_grid(prev_grid)
+        lock.acquire()
+        control_scores = model(np.expand_dims(state, axis=0))
+        lock.release()
+        control_buttons = np.flip(np.argsort(control_scores),axis=1)
+        # copy the Q-values as labels, for use in Bellman update
+        labels = control_scores[0].numpy().copy()
+        prev_max = np.max(prev_grid)
+        # follow greedy or explore?
+        if np.random.rand()<epsilon:    # explore / random move
+            legal_moves = []
+            for i in range(4):
+                temp_grid = prev_grid.copy()
+                temp_grid, changed, _ = controls[i](temp_grid)
+                if changed: legal_moves.append(i)
+                else: continue
+            if len(legal_moves)==0:
+                finish = True
+                continue
+
+            # apply random move
+            move = np.random.choice(legal_moves)
+            temp_grid = prev_grid.copy()
+            temp_grid, _, score = controls[move](temp_grid) 
+        else:                           # make greedy move with max expected reward
+            for move in control_buttons[0]:
+                prev_state = prev_grid.copy()
+                temp_grid, changed, score = controls[move](prev_state)
+                if not changed: #illegal move
+                    labels[move] = 0
+                    continue
+                else:
+                    break
+
+        n_merges = countEmptyCells(temp_grid) - countEmptyCells(prev_grid)
+        finish = game_over(temp_grid)
+        if not finish: temp_grid = insert_new(temp_grid)
+        grid = temp_grid.copy()
+        ep_score += score
+        next_max = np.max(temp_grid)
+
+        #update reward
+        if next_max == prev_max: labels[move] = 0
+        else: labels[move] = (math.log(next_max,2))*0.1
+        labels[move] += n_merges        # having more empty squares is better
+
+        # get the next state max Q value
+        temp_grid = model.power_grid(temp_grid)
+        lock.acquire()
+        temp_scores = model(np.expand_dims(temp_grid, axis=0))
+        lock.release()
+        max_qval = np.max(temp_scores)
+        labels[move] += cfg.MODEL.TRAIN.GAMMA*max_qval
+
+        # insert episode into replay memory
+        prev_state = model.power_grid(prev_grid)
+        replay_labels.append(labels)
+        replay_memory.append(prev_state)
+        
+        n_iter += 1
+
+    return replay_memory, replay_labels, n_iter, ep_score, next_max
+
 def generate_replay_dataset(model):
     n_iter = 0
-    max_score, max_score_ep, max_tile= -1, -1, -1
+    NUM_EPS_PER_ITER = 10
+    max_score, max_tile= -1, -1
     replay_memory = []
     replay_labels = []
     controls = {0:up, 1:left, 2:right, 3:down}
     epsilon = cfg.MODEL.TRAIN.EPSILON
+    pool = ThreadPool(cfg.MODEL.TRAIN.NUM_WORKERS)
 
     global pbar, train_loss
+    ep_finished = 0
+    while ep_finished < cfg.MODEL.TRAIN.NUM_EPISODES:
+        rtn_arr = pool.map(play_single_game, [(model, epsilon, controls) for _ in range(NUM_EPS_PER_ITER*cfg.MODEL.TRAIN.NUM_WORKERS)])
+        ep_replay_mem, ep_replay_labels, ep_iters, ep_scores, ep_maxs = zip(*rtn_arr)
+        n_iter += sum(ep_iters)
+        ep_finished += NUM_EPS_PER_ITER*cfg.MODEL.TRAIN.NUM_WORKERS
+        replay_memory.extend(ep_replay_mem)
+        replay_labels.extend(ep_replay_labels)
+        # update epsilon value
+        if epsilon>0.1 and n_iter%2500==0:
+            epsilon /= 1.005
 
-    for ep in range(cfg.MODEL.TRAIN.NUM_EPISODES):
-        # Initialize new game episode
-        grid = new_game(cfg.GAME_CONFIG.GRID_LEN)
-        finish = False
-        ep_score = 0
-
-        while not finish:
-            # run model and select move with highest Q value
-            prev_grid = grid.copy()
-            state = model.power_grid(prev_grid)
-            control_scores = model(np.expand_dims(state, axis=0))
-            control_buttons = np.flip(np.argsort(control_scores),axis=1)
-            # copy the Q-values as labels, for use in Bellman update
-            labels = control_scores[0].numpy().copy()
-            prev_max = np.max(prev_grid)
-            # follow greedy or explore?
-            if np.random.rand()<epsilon:    # explore / random move
-                legal_moves = []
-                for i in range(4):
-                    temp_grid = prev_grid.copy()
-                    temp_grid, changed, _ = controls[i](temp_grid)
-                    if changed: legal_moves.append(i)
-                    else: continue
-                if len(legal_moves)==0:
-                    finish = True
-                    continue
-
-                # apply random move
-                move = np.random.choice(legal_moves)
-                temp_grid = prev_grid.copy()
-                temp_grid, _, score = controls[move](temp_grid) 
-            else:                           # make greedy move with max expected reward
-                for move in control_buttons[0]:
-                    prev_state = prev_grid.copy()
-                    temp_grid, changed, score = controls[move](prev_state)
-                    if not changed: #illegal move
-                        labels[move] = 0
-                        continue
-                    else:
-                        break
-
-            n_merges = countEmptyCells(temp_grid) - countEmptyCells(prev_grid)
-            finish = game_over(temp_grid)
-            if not finish: temp_grid = insert_new(temp_grid)
-            grid = temp_grid.copy()
-            ep_score += score
-            next_max = np.max(temp_grid)
-
-            #update reward
-            if next_max == prev_max: labels[move] = 0
-            else: labels[move] = (math.log(next_max,2))*0.1
-            labels[move] += n_merges        # having more empty squares is better
-
-            # get the next state max Q value
-            temp_grid = model.power_grid(temp_grid)
-            temp_scores = model(np.expand_dims(temp_grid, axis=0))
-            max_qval = np.max(temp_scores)
-            labels[move] += cfg.MODEL.TRAIN.GAMMA*max_qval
-
-            # update epsilon value
-            if ep>10000 or (epsilon>0.1 and n_iter%2500==0):
-                epsilon /= 1.005
-
-            # insert episode into replay memory
-            prev_state = model.power_grid(prev_grid)
-            replay_labels.append(labels)
-            replay_memory.append(prev_state)
-
-            if len(replay_memory)>=cfg.MODEL.TRAIN.MEM_CAPACITY:    # update model using replay memory
-                yield replay_memory, replay_labels
-                replay_memory, replay_labels = [], []
-            
-            n_iter += 1
-
-        if ep_score>max_score:
-            max_score = ep_score
-            max_score_ep = ep
-            max_tile = next_max
-        pbar.update()
+        if len(replay_memory)>=cfg.MODEL.TRAIN.MEM_CAPACITY:    # update model using replay memory
+            yield replay_memory, replay_labels
+            replay_memory, replay_labels = [], []
+        
+        ep_scores = np.array(ep_scores)
+        ep_max_id = np.argmax(ep_scores)
+        if ep_scores[ep_max_id]>max_score:
+            max_score = ep_scores[ep_max_id]
+            max_tile = ep_maxs[ep_max_id]
+        pbar.update(n=NUM_EPS_PER_ITER*cfg.MODEL.TRAIN.NUM_WORKERS)
         pbar.set_postfix({'Best_score': max_score, 'Best_tile': max_tile, 'loss':float(train_loss.result())})
         # if (ep+1)%1000 == 0:
         #     print('Best score: {}, Best episode num: {}'.format(max_score, max_score_ep))
@@ -188,6 +207,7 @@ if __name__=='__main__':
     model = Simple_RLAgent(train=True)
     print('[INFO    ] Model initialized')
     model(tf.ones((1,4,4,16)))
+    lock = Lock()
     try:
         latest = tf.train.latest_checkpoint(cfg.MODEL.CHECKPOINT_DIR)
         model.load_weights(latest)
@@ -205,11 +225,10 @@ if __name__=='__main__':
     epoch = 1
     print('[INFO    ] Started data generation')
     pbar = tqdm.tqdm(total=cfg.MODEL.TRAIN.NUM_EPISODES, desc='train', dynamic_ncols=True)
-    
     for replay_memory, replay_labels in generate_replay_dataset(model):
         replay_memory = np.array(replay_memory, dtype=np.float32)
         replay_labels = np.array(replay_labels, dtype=np.float32)
-        train_ds = tf.data.Dataset.from_tensor_slices((replay_memory, replay_labels)).shuffle(cfg.MODEL.TRAIN.MEM_CAPACITY).batch(cfg.MODEL.TRAIN.BATCH_SIZE)
+        train_ds = tf.data.Dataset.from_tensor_slices((replay_memory, replay_labels)).shuffle(len(replay_labels)).batch(cfg.MODEL.TRAIN.BATCH_SIZE)
         
         for grid_ins, labels in train_ds:
             with tf.GradientTape() as tape:

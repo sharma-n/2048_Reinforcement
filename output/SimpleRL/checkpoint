@@ -1,2 +1,2 @@
-model_checkpoint_path: "cp-1475.ckpt"
-all_model_checkpoint_paths: "cp-1475.ckpt"
+model_checkpoint_path: "cp-4275.ckpt"
+all_model_checkpoint_paths: "cp-4275.ckpt"

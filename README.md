@@ -2,7 +2,8 @@
 This repository aims to build multiple reinforcement learning agents using different techniques to play the well-known 2048 game! As more and more methods are covered, I will try to compare the different approaches in terms of performance and probability of success.
 
 ## Visualizations
-Here's a quick demo of the RL agent playing the game!
+Here's a quick demo of the RL agent playing the game reaching the 2048 tile!
+
 ![Simple RL Agent demo](images/gameplay.gif)
 
 Yeah, sadly it's not very good yet. A part of that is because I haven't been able to train the model for very long (I only have a MX150). So if anyone has a great GPU and wants to share their model, you're welcome to do so! I will try to train the model further, but I think it might be a better idea to try new methods.
@@ -38,4 +39,5 @@ $ python simpleRL.py
 - [x] Build initial game code to allow human players
 - [X] Extend game mechanics to allow reinforcement learning agents
 - [X] Build a simple reinforcement learning agent to play the game
+- [x] Parallel gameplay during reinforcement learning training
 - [ ] Improve the performance of the RL Agent
